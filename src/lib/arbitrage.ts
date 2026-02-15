@@ -8,8 +8,8 @@ const DEXHUNTER_FEE_PCT = 0.015 // ~1.5% of trade
 const POOL_FEE_PCT = 0.003      // ~0.3% pool swap fee
 
 // Minimum liquidity: pool must have enough tokens to handle our trade
-// without extreme slippage (at least 5x our trade size in token liquidity)
-const MIN_LIQUIDITY_MULTIPLIER = 5
+// without extreme slippage (at least 2x our trade size in ADA value)
+const MIN_LIQUIDITY_MULTIPLIER = 2
 
 function estimateSwapFees(amountAda: number): number {
   return FIXED_FEE_PER_SWAP + (amountAda * DEXHUNTER_FEE_PCT) + (amountAda * POOL_FEE_PCT)

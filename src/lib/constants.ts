@@ -8,7 +8,7 @@ export const DEX_FEES: Record<string, number> = {
 // Real per-swap cost: ~0.3 ADA network fee + ~2 ADA batcher fee + ~1.5 ADA DexHunter fee = ~3.8 ADA
 export const TX_FEE_ADA = 3.8
 
-export const DEFAULT_TRADE_SIZE_ADA = 1000
+export const DEFAULT_TRADE_SIZE_ADA = 200
 
 export const TOKEN_POLICY_IDS: Record<string, { policyId: string; assetName: string }> = {
   MIN: { policyId: '29d222ce763455e3d7a09a665ce554f00ac89d2e99a1a83d267170c6', assetName: '4d494e' },
