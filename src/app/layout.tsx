@@ -30,6 +30,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 function Header() {
   const [walletOpen, setWalletOpen] = useState(false)
   const wallet = useWallet()
+  const exec = useExecution()
 
   return (
     <>
@@ -47,6 +48,15 @@ function Header() {
             </nav>
           </div>
           <div className="flex items-center gap-3 text-sm">
+            {/* Server wallet indicator */}
+            {exec.serverWallet?.configured && (
+              <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-emerald-500/10 border border-emerald-500/20">
+                <span className="inline-block w-2 h-2 rounded-full bg-emerald-400" />
+                <span className="text-xs text-emerald-400 font-medium">Auto-Sign</span>
+                <span className="font-mono text-xs text-slate-400">{exec.serverWallet.addressTruncated}</span>
+                <span className="font-mono text-emerald-400 font-bold text-xs">{exec.serverWallet.balanceAda.toFixed(1)} ₳</span>
+              </div>
+            )}
             {wallet.connected ? (
               <div className="flex items-center gap-2">
                 <span className="inline-block w-2 h-2 rounded-full bg-emerald-400" />

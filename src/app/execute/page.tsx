@@ -46,7 +46,7 @@ export default function ExecutePage() {
     const now = Date.now()
     const cooldownMs = exec.settings.cooldownSeconds * 1000
     if (now - exec.lastTradeTime < cooldownMs) return
-    if (!wallet.connected && !exec.settings.dryRun) return
+    if (!wallet.connected && !exec.serverWallet?.configured && !exec.settings.dryRun) return
 
     const viable = data.opportunities.filter(o =>
       o.spreadPct >= exec.settings.minSpread &&
@@ -87,10 +87,25 @@ export default function ExecutePage() {
         </div>
       )}
 
-      {/* Wallet not connected warning */}
-      {!wallet.connected && !settings.dryRun && (
+      {/* Server wallet info */}
+      {exec.serverWallet?.configured && (
+        <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-4 py-2.5 text-emerald-300 text-sm flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span>🔐</span>
+            <span><strong>Auto-Sign: Enabled (Server Wallet)</strong></span>
+            <span className="text-slate-400">|</span>
+            <span className="font-mono text-xs">{exec.serverWallet.addressTruncated}</span>
+            <span className="text-slate-400">|</span>
+            <span className="font-mono font-bold">{exec.serverWallet.balanceAda.toFixed(2)} ₳</span>
+          </div>
+          <span className="text-xs text-emerald-400/60">No browser wallet needed for trading</span>
+        </div>
+      )}
+
+      {/* Wallet not connected warning - only show if no server wallet */}
+      {!wallet.connected && !exec.serverWallet?.configured && !settings.dryRun && (
         <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-2.5 text-red-300 text-sm">
-          🔌 <strong>Wallet not connected</strong> — Connect your wallet to execute live trades.
+          🔌 <strong>No wallet available</strong> — Connect a browser wallet or configure server wallet for live trades.
         </div>
       )}
 
@@ -98,8 +113,8 @@ export default function ExecutePage() {
       <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
         <StatusCard
           label="Wallet"
-          value={wallet.connected ? `${wallet.balance.toFixed(1)} ₳` : 'Disconnected'}
-          color={wallet.connected ? 'text-emerald-400' : 'text-red-400'}
+          value={exec.serverWallet?.configured ? `${exec.serverWallet.balanceAda.toFixed(1)} ₳ (Server)` : wallet.connected ? `${wallet.balance.toFixed(1)} ₳` : 'Disconnected'}
+          color={exec.serverWallet?.configured || wallet.connected ? 'text-emerald-400' : 'text-red-400'}
         />
         <StatusCard label="Trades Today" value={exec.dailyPnL.tradeCount.toString()} color="text-blue-400" />
         <StatusCard
@@ -177,12 +192,12 @@ export default function ExecutePage() {
             if (!exec.isAutoTrading) setShowAutoConfirm(true)
             else exec.toggleAutoTrade()
           }}
-          disabled={!wallet.connected && !settings.dryRun}
+          disabled={!wallet.connected && !exec.serverWallet?.configured && !settings.dryRun}
           className={`px-4 py-2 rounded-lg text-sm font-bold transition ${
             exec.isAutoTrading
               ? 'bg-orange-500/20 border border-orange-500/30 text-orange-400'
               : 'bg-slate-800 border border-slate-700 text-slate-400 hover:text-white'
-          } ${!wallet.connected && !settings.dryRun ? 'opacity-50 cursor-not-allowed' : ''}`}
+          } ${!wallet.connected && !exec.serverWallet?.configured && !settings.dryRun ? 'opacity-50 cursor-not-allowed' : ''}`}
         >
           {exec.isAutoTrading ? '🤖 AUTO ON — Click to Stop' : '🤖 Enable Auto-Trade'}
         </button>
@@ -272,7 +287,7 @@ export default function ExecutePage() {
                 settings={settings}
                 onExecute={() => exec.executeTrade(o)}
                 executing={exec.executionStatus !== 'idle'}
-                walletConnected={wallet.connected}
+                walletConnected={wallet.connected || !!exec.serverWallet?.configured}
               />
             ))}
           </div>
@@ -365,7 +380,7 @@ export default function ExecutePage() {
               <div>• Daily loss limit: {settings.dailyLossLimit} ADA</div>
               <div>• Slippage protection: {settings.maxSlippage}%</div>
               <div>• 10 ADA reserve always maintained</div>
-              <div>• Transactions require wallet signature approval</div>
+              <div>• {exec.serverWallet?.configured ? 'Transactions auto-signed by server wallet' : 'Transactions require wallet signature approval'}</div>
             </div>
             <div className="flex gap-3 justify-center">
               <button onClick={() => setShowLiveConfirm(false)} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded text-sm">Cancel</button>
