@@ -81,6 +81,29 @@ async function getWalletInfo(address: string) {
   return { balanceAda, tokens }
 }
 
+// Pre-flight estimate: get exact fees before committing
+async function estimateSwap(tokenIn: string, tokenOut: string, amountIn: number, slippage: number) {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (DEXHUNTER_PARTNER_KEY) headers['X-Partner-Id'] = DEXHUNTER_PARTNER_KEY
+
+  const resp = await fetch(`${DEXHUNTER_API}/swap/estimate`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ token_in: tokenIn, token_out: tokenOut, amount_in: amountIn, slippage, blacklisted_dexes: [] }),
+  })
+  if (!resp.ok) return null
+  const data = await resp.json()
+  return {
+    totalOutput: data.total_output as number,
+    totalOutputNoSlippage: data.total_output_without_slippage as number,
+    dexhunterFee: data.dexhunter_fee as number,
+    batcherFee: data.batcher_fee as number,
+    totalFee: data.total_fee as number,
+    deposits: data.deposits as number,
+    splits: data.splits,
+  }
+}
+
 async function buildAndSignSwap(
   lucid: Awaited<ReturnType<typeof initLucid>>,
   walletAddress: string,
@@ -219,7 +242,51 @@ export async function POST(req: NextRequest) {
     // === ARBITRAGE MODE: buy then sell in sequence ===
     if (mode === 'arbitrage') {
       const { buyDex, sellDex } = body
+      const tokenOutUnit = buyUnit === 'lovelace' ? '' : buyUnit
+
+      // === PRE-FLIGHT: Estimate both legs and check profitability ===
+      console.log(`[arb] Pre-flight: estimating ${amount} ADA → ${tokenB} → ADA`)
       
+      const buyEstimate = await estimateSwap('', tokenOutUnit, amount, slippage)
+      if (!buyEstimate) {
+        return NextResponse.json({ success: false, error: 'Failed to estimate buy leg' }, { status: 502 })
+      }
+
+      const sellEstimate = await estimateSwap(tokenOutUnit, '', buyEstimate.totalOutput, slippage)
+      if (!sellEstimate) {
+        return NextResponse.json({ success: false, error: 'Failed to estimate sell leg' }, { status: 502 })
+      }
+
+      // Calculate total fees and expected profit
+      const buyFees = (buyEstimate.dexhunterFee || 0) + (buyEstimate.batcherFee || 0) + 0.3 // +0.3 for network fee
+      const sellFees = (sellEstimate.dexhunterFee || 0) + (sellEstimate.batcherFee || 0) + 0.3
+      const totalFees = buyFees + sellFees
+      const expectedReturn = sellEstimate.totalOutput || 0
+      const expectedProfit = expectedReturn - amount - totalFees
+
+      console.log(`[arb] Pre-flight results:`)
+      console.log(`  Buy:  ${amount} ADA → ${buyEstimate.totalOutput} ${tokenB} (fees: ${buyFees.toFixed(2)} ADA)`)
+      console.log(`  Sell: ${buyEstimate.totalOutput} ${tokenB} → ${expectedReturn.toFixed(2)} ADA (fees: ${sellFees.toFixed(2)} ADA)`)
+      console.log(`  Total fees: ${totalFees.toFixed(2)} ADA`)
+      console.log(`  Expected profit: ${expectedProfit.toFixed(2)} ADA`)
+
+      if (expectedProfit <= 0) {
+        return NextResponse.json({
+          success: false,
+          error: `Trade would LOSE money. Expected: ${expectedReturn.toFixed(2)} ADA back from ${amount} ADA invested. Total fees: ${totalFees.toFixed(2)} ADA. Net: ${expectedProfit.toFixed(2)} ADA`,
+          preflight: {
+            buyOutput: buyEstimate.totalOutput,
+            sellOutput: expectedReturn,
+            buyFees,
+            sellFees,
+            totalFees,
+            expectedProfit,
+          },
+        }, { status: 400 })
+      }
+
+      console.log(`[arb] ✅ Pre-flight passed. Expected profit: ${expectedProfit.toFixed(2)} ADA. Executing...`)
+
       // Step 1: Buy token (ADA → Token)
       console.log(`[arb] Step 1: Buy ${tokenB} with ${amount} ADA on ${buyDex || 'best'}`)
       const buyResult = await buildAndSignSwap(
@@ -270,6 +337,12 @@ export async function POST(req: NextRequest) {
         buyEstimatedOutput: buyResult.estimatedOutput,
         sellEstimatedOutput: sellResult.estimatedOutput,
         netProfitAda: (sellResult.estimatedOutput || 0) - amount,
+        fees: {
+          buy: buyFees,
+          sell: sellFees,
+          total: totalFees,
+          preflightProfit: expectedProfit,
+        },
         walletAddress,
         source: 'server-wallet',
       })
