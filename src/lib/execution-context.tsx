@@ -100,6 +100,7 @@ export function ExecutionProvider({ children }: { children: ReactNode }) {
   const [lastTradeTime, setLastTradeTime] = useState(0)
   const [serverWallet, setServerWallet] = useState<ServerWalletInfo | null>(null)
   const killRef = useRef(false)
+  const failedPairs = useRef(new Map<string, number>())
 
   const refreshServerWallet = useCallback(async () => {
     try {
@@ -175,6 +176,14 @@ export function ExecutionProvider({ children }: { children: ReactNode }) {
       return
     }
 
+    // Failed pair cooldown — don't retry pairs that failed pre-flight for 5 minutes
+    const failKey = `${opp.pair}-${opp.buyDex}-${opp.sellDex}`
+    const failedAt = failedPairs.current.get(failKey)
+    if (failedAt && now - failedAt < 300_000) {
+      setStatusDetail(`${opp.pair} failed pre-flight recently, skipping for ${Math.ceil((300_000 - (now - failedAt)) / 1000)}s`)
+      return
+    }
+
     // Min profit check (must clear fees + 1%)
     // Let the server-side pre-flight handle profitability checks with real DexHunter estimates.
     // Just require any positive profit after the pre-flight says yes.
@@ -239,6 +248,12 @@ export function ExecutionProvider({ children }: { children: ReactNode }) {
         trade.errorMessage = result.error
         trade.netProfit = result.success ? (opp.netProfitAda - result.totalFees) : 0
 
+        // Track failed pairs so we don't spam-retry them
+        if (!result.success) {
+          const fk = `${opp.pair}-${opp.buyDex}-${opp.sellDex}`
+          failedPairs.current.set(fk, Date.now())
+        }
+
         const updated = addTrade(trade)
         setRecentTrades(updated.slice(0, 50))
         notifyTrade(trade)
@@ -247,6 +262,9 @@ export function ExecutionProvider({ children }: { children: ReactNode }) {
       } catch (e) {
         trade.status = 'failed'
         trade.errorMessage = e instanceof Error ? e.message : 'Unknown error'
+        // Track failed pairs
+        const fk = `${opp.pair}-${opp.buyDex}-${opp.sellDex}`
+        failedPairs.current.set(fk, Date.now())
         addTrade(trade)
         notifyTrade(trade)
       }
