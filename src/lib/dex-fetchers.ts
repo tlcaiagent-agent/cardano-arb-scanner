@@ -81,63 +81,60 @@ const ESTIMATE_TOKENS: { symbol: string; unit: string }[] = Object.entries(TOKEN
   ([symbol, { policyId, assetName }]) => ({ symbol, unit: policyId + assetName })
 )
 
-async function fetchDexHunterEstimate(tokenSymbol: string, tokenUnit: string, amountAda: number = 100): Promise<TokenPrice[]> {
+// DEX groups for blacklist-based per-DEX querying
+const DEX_GROUPS: { name: string; blacklistOthers: string[] }[] = [
+  { name: 'Minswap', blacklistOthers: ['SUNDAESWAP', 'SUNDAESWAPV3', 'WINGRIDER', 'WINGRIDERV2', 'MUESLISWAP', 'VYFI', 'SPLASH', 'CSWAP', 'CHADSWAP', 'SNEKFUN', 'CHAKRA', 'SHADOWBOOK'] },
+  { name: 'SundaeSwap', blacklistOthers: ['MINSWAP', 'MINSWAPV2', 'MS2HOP', 'WINGRIDER', 'WINGRIDERV2', 'MUESLISWAP', 'VYFI', 'SPLASH', 'CSWAP', 'CHADSWAP', 'SNEKFUN', 'CHAKRA', 'SHADOWBOOK'] },
+  { name: 'WingRiders', blacklistOthers: ['MINSWAP', 'MINSWAPV2', 'MS2HOP', 'SUNDAESWAP', 'SUNDAESWAPV3', 'MUESLISWAP', 'VYFI', 'SPLASH', 'CSWAP', 'CHADSWAP', 'SNEKFUN', 'CHAKRA', 'SHADOWBOOK'] },
+  { name: 'VyFi', blacklistOthers: ['MINSWAP', 'MINSWAPV2', 'MS2HOP', 'SUNDAESWAP', 'SUNDAESWAPV3', 'WINGRIDER', 'WINGRIDERV2', 'MUESLISWAP', 'SPLASH', 'CSWAP', 'CHADSWAP', 'SNEKFUN', 'CHAKRA', 'SHADOWBOOK'] },
+  { name: 'Splash', blacklistOthers: ['MINSWAP', 'MINSWAPV2', 'MS2HOP', 'SUNDAESWAP', 'SUNDAESWAPV3', 'WINGRIDER', 'WINGRIDERV2', 'MUESLISWAP', 'VYFI', 'CSWAP', 'CHADSWAP', 'SNEKFUN', 'CHAKRA', 'SHADOWBOOK'] },
+  { name: 'MuesliSwap', blacklistOthers: ['MINSWAP', 'MINSWAPV2', 'MS2HOP', 'SUNDAESWAP', 'SUNDAESWAPV3', 'WINGRIDER', 'WINGRIDERV2', 'VYFI', 'SPLASH', 'CSWAP', 'CHADSWAP', 'SNEKFUN', 'CHAKRA', 'SHADOWBOOK'] },
+]
+
+async function fetchPerDexPrice(tokenSymbol: string, tokenUnit: string, dexGroup: typeof DEX_GROUPS[0], amountAda: number = 100): Promise<TokenPrice | null> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (DEXHUNTER_PARTNER_KEY) headers['X-Partner-Id'] = DEXHUNTER_PARTNER_KEY
 
-  // DexHunter takes amounts in ADA (NOT lovelace)
   const body = {
-    token_in: '',  // ADA
+    token_in: '',
     token_out: tokenUnit,
     amount_in: amountAda,
     slippage: 2,
-    blacklisted_dexes: [],
+    blacklisted_dexes: dexGroup.blacklistOthers,
   }
 
-  const resp = await fetchWithTimeout(`${DEXHUNTER_API}/swap/estimate`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-  })
+  try {
+    const resp = await fetchWithTimeout(`${DEXHUNTER_API}/swap/estimate`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    }, 6000)
 
-  if (!resp.ok) return []
-  const data = await resp.json()
-  const splits = data.splits || []
-  const prices: TokenPrice[] = []
+    if (!resp.ok) return null
+    const data = await resp.json()
+    const output = data.total_output
+    if (!output || output <= 0) return null
 
-  // Group splits by DEX and calculate effective price
-  const dexPrices = new Map<string, { totalIn: number; totalOut: number }>()
-  for (const split of splits) {
-    const dexRaw = split.dex || ''
-    const dexName = mapDexName(dexRaw)
-    if (!dexName) continue
-
-    const existing = dexPrices.get(dexName) || { totalIn: 0, totalOut: 0 }
-    existing.totalIn += split.amount_in || 0
-    existing.totalOut += split.expected_output || 0
-    dexPrices.set(dexName, existing)
-  }
-
-  for (const [dex, { totalIn, totalOut }] of dexPrices) {
-    if (totalOut <= 0 || totalIn <= 0) continue
-    // Price = ADA per token (totalIn is already in ADA)
-    const priceAdaPerToken = totalIn / totalOut
-    prices.push({
+    return {
       tokenA: 'ADA',
       tokenB: tokenSymbol,
       pair: `ADA/${tokenSymbol}`,
-      dex,
-      price: priceAdaPerToken,
-      liquidity: totalOut,
+      dex: dexGroup.name,
+      price: amountAda / output,
+      liquidity: output,
       timestamp: Date.now(),
-    })
+    }
+  } catch {
+    return null
   }
+}
 
-  // NOTE: Do NOT add DexHunter aggregate price as a "DEX" — it's a composite
-  // of all DEXes and can't be traded against individually. Including it creates
-  // false arbitrage signals (aggregate vs single DEX spread).
-
-  return prices
+async function fetchDexHunterEstimate(tokenSymbol: string, tokenUnit: string, amountAda: number = 100): Promise<TokenPrice[]> {
+  // Query each DEX individually by blacklisting all others
+  const results = await Promise.all(
+    DEX_GROUPS.map(dg => fetchPerDexPrice(tokenSymbol, tokenUnit, dg, amountAda))
+  )
+  return results.filter((p): p is TokenPrice => p !== null)
 }
 
 /**
