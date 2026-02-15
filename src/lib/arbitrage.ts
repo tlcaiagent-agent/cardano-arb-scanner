@@ -46,6 +46,11 @@ export function findArbOpportunities(
         const spreadPct = ((sell.price - buy.price) / buy.price) * 100
         if (spreadPct < minSpreadPct) continue
 
+        // Filter on real ADA liquidity — both sides must have >= 5000 ADA depth
+        const buyLiqAda = buy.buyLiquidityAda || 0
+        const sellLiqAda = sell.sellLiquidityAda || 0
+        if (buyLiqAda < 5000 || sellLiqAda < 5000) continue
+
         // Calculate profit with REALISTIC fees + price impact buffer
         const tokensAcquired = tradeSize / buy.price
         const grossReturn = tokensAcquired * sell.price
@@ -78,6 +83,8 @@ export function findArbOpportunities(
           estimatedProfitAda: adjustedReturn - tradeSize,
           buyLiquidity: buy.liquidity,
           sellLiquidity: sell.liquidity,
+          buyLiquidityAda: buyLiqAda,
+          sellLiquidityAda: sellLiqAda,
           netProfitAda: netProfit,
           timestamp: Date.now(),
           tier,

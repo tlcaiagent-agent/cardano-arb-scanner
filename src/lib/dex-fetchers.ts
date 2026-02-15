@@ -95,6 +95,7 @@ async function fetchPerDexPrice(tokenSymbol: string, tokenUnit: string, dexGroup
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (DEXHUNTER_PARTNER_KEY) headers['X-Partner-Id'] = DEXHUNTER_PARTNER_KEY
 
+  // 1) Get price at trade size (200 ADA)
   const body = {
     token_in: '',
     token_out: tokenUnit,
@@ -115,6 +116,18 @@ async function fetchPerDexPrice(tokenSymbol: string, tokenUnit: string, dexGroup
     const output = data.total_output
     if (!output || output <= 0) return null
 
+    // Estimate pool depth via price impact from the split data
+    // price_impact tells us how much the pool moved — lower = deeper pool
+    const split = data.splits?.[0]
+    const priceImpact = split?.price_impact || 1
+    // Approximate pool TVL: if 200 ADA caused X% impact, pool is roughly 200/impact ADA deep
+    // e.g., 200 ADA with 0.01 (1%) impact ≈ 20,000 ADA pool
+    const estimatedPoolDepthAda = priceImpact > 0 ? Math.min(amountAda / priceImpact, 1_000_000) : amountAda
+    
+    // Sell-side liquidity estimate: similar depth (symmetric pools)
+    const buyLiquidityAda = Math.round(estimatedPoolDepthAda)
+    const sellLiquidityAda = Math.round(estimatedPoolDepthAda)
+
     return {
       tokenA: 'ADA',
       tokenB: tokenSymbol,
@@ -122,6 +135,8 @@ async function fetchPerDexPrice(tokenSymbol: string, tokenUnit: string, dexGroup
       dex: dexGroup.name,
       price: amountAda / output,
       liquidity: output,
+      buyLiquidityAda,
+      sellLiquidityAda,
       timestamp: Date.now(),
     }
   } catch {

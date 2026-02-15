@@ -5,6 +5,8 @@ export interface TokenPrice {
   dex: string
   price: number
   liquidity: number
+  buyLiquidityAda?: number   // estimated buy-side pool depth in ADA
+  sellLiquidityAda?: number  // estimated sell-side pool depth in ADA
   timestamp: number
 }
 
@@ -21,6 +23,8 @@ export interface ArbOpportunity {
   estimatedProfitAda: number
   buyLiquidity: number
   sellLiquidity: number
+  buyLiquidityAda: number   // buy-side pool depth in ADA
+  sellLiquidityAda: number  // sell-side pool depth in ADA
   netProfitAda: number
   timestamp: number
   tier: 'green' | 'yellow' | 'red'
