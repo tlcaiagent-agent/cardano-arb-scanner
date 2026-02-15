@@ -5,7 +5,8 @@ export const DEX_FEES: Record<string, number> = {
   MuesliSwap: 0.003,
 }
 
-export const TX_FEE_ADA = 0.25
+// Real per-swap cost: ~0.3 ADA network fee + ~2 ADA batcher fee + ~1.5 ADA DexHunter fee = ~3.8 ADA
+export const TX_FEE_ADA = 3.8
 
 export const DEFAULT_TRADE_SIZE_ADA = 1000
 
@@ -61,7 +62,7 @@ export const CACHE_TTL_MS = 12_000
 export const STALE_THRESHOLD_MS = 30_000
 
 export const RISK_LEVELS = {
-  conservative: { label: 'Conservative', minSpread: 3, description: '>3% spread only' },
-  moderate: { label: 'Moderate', minSpread: 1.5, description: '>1.5% spread' },
-  aggressive: { label: 'Aggressive', minSpread: 0.5, description: '>0.5% spread' },
+  conservative: { label: 'Conservative', minSpread: 5, description: '>5% spread only (safest)' },
+  moderate: { label: 'Moderate', minSpread: 3, description: '>3% spread' },
+  aggressive: { label: 'Aggressive', minSpread: 2, description: '>2% spread (min to cover fees)' },
 } as const

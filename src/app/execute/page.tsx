@@ -50,7 +50,7 @@ export default function ExecutePage() {
 
     const viable = data.opportunities.filter(o =>
       o.spreadPct >= exec.settings.minSpread &&
-      o.netProfitAda >= (exec.settings.tradeSize * 0.01 + 0.5) // min 1% + fees
+      o.netProfitAda >= (exec.settings.tradeSize * 0.01 + 8.0) // min 1% + real fees (~8 ADA round trip)
     )
 
     if (viable.length > 0) {
@@ -59,7 +59,7 @@ export default function ExecutePage() {
   }, [data, exec.isAutoTrading, exec.executionStatus])
 
   const topOpps = data?.opportunities
-    .filter(o => o.netProfitAda >= 0.5 && o.spreadPct >= exec.settings.minSpread)
+    .filter(o => o.netProfitAda >= 8.0 && o.spreadPct >= exec.settings.minSpread)
     .slice(0, 8) || []
 
   const { settings } = exec
