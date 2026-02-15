@@ -4,6 +4,8 @@ import './globals.css'
 import { useState } from 'react'
 import { WalletProvider } from '@/lib/wallet-context'
 import { useWallet } from '@/lib/wallet-context'
+import { ExecutionProvider } from '@/lib/execution-context'
+import { useExecution } from '@/lib/execution-context'
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -14,8 +16,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body className="min-h-screen bg-[#0a0e17] text-slate-200 antialiased">
         <WalletProvider>
-          <Header />
-          <main className="max-w-7xl mx-auto px-4 py-6">{children}</main>
+          <ExecutionProvider>
+            <Header />
+            <LiveTradingBanner />
+            <main className="max-w-7xl mx-auto px-4 py-6">{children}</main>
+          </ExecutionProvider>
         </WalletProvider>
       </body>
     </html>
@@ -140,6 +145,53 @@ function Header() {
                 </button>
               </>
             )}
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
+function LiveTradingBanner() {
+  const exec = useExecution()
+
+  if (exec.executionStatus === 'idle' && !exec.isAutoTrading) return null
+
+  return (
+    <>
+      {/* Kill Switch - fixed bottom right */}
+      {(exec.isAutoTrading || exec.executionStatus !== 'idle') && (
+        <button
+          onClick={exec.killSwitch}
+          className="fixed bottom-6 right-6 z-50 px-6 py-3 bg-red-600 hover:bg-red-500 text-white rounded-xl text-lg font-bold shadow-2xl shadow-red-900/50 animate-pulse"
+        >
+          🛑 STOP ALL TRADING
+        </button>
+      )}
+
+      {/* Active execution banner */}
+      {exec.executionStatus !== 'idle' && (
+        <div className="bg-blue-900/30 border-b border-blue-500/30 px-4 py-2 text-sm">
+          <div className="max-w-7xl mx-auto flex items-center gap-3">
+            <div className="animate-spin w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full" />
+            <span className="text-blue-400 font-medium">{exec.executionStatus.toUpperCase()}</span>
+            <span className="text-slate-400">{exec.statusDetail}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Auto-trade active banner */}
+      {exec.isAutoTrading && exec.executionStatus === 'idle' && (
+        <div className="bg-orange-900/20 border-b border-orange-500/30 px-4 py-1.5 text-xs">
+          <div className="max-w-7xl mx-auto flex items-center gap-2">
+            <span className="text-orange-400">🤖 Auto-trading active</span>
+            <span className="text-slate-500">|</span>
+            <span className="text-slate-400">
+              Today: {exec.dailyPnL.tradeCount} trades, {exec.dailyPnL.net >= 0 ? '+' : ''}{exec.dailyPnL.net.toFixed(2)} ₳
+            </span>
+            <button onClick={exec.killSwitch} className="ml-auto text-red-400 hover:text-red-300 font-medium">
+              Stop
+            </button>
           </div>
         </div>
       )}

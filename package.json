@@ -8,16 +8,17 @@
     "start": "next start"
   },
   "dependencies": {
+    "lucid-cardano": "^0.10.11",
     "next": "^14",
     "react": "^18",
     "react-dom": "^18"
   },
   "devDependencies": {
-    "typescript": "^5",
-    "@types/react": "^18",
     "@types/node": "^20",
-    "tailwindcss": "^3",
+    "@types/react": "^18",
+    "autoprefixer": "^10",
     "postcss": "^8",
-    "autoprefixer": "^10"
+    "tailwindcss": "^3",
+    "typescript": "^5"
   }
 }
