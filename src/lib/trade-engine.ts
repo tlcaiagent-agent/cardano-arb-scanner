@@ -1,7 +1,7 @@
 // Auto-Trade Engine Types & Logic
 
 export interface TradeSettings {
-  tradeSize: number       // 10-200 ADA, default 50
+  tradeSize: number       // 10-200 ADA, default 200
   minSpread: number       // 1-10%, default 2
   maxSlippage: number     // 0.5-5%, default 1.5
   riskLevel: 'conservative' | 'moderate' | 'aggressive'
@@ -12,7 +12,7 @@ export interface TradeSettings {
 }
 
 export const DEFAULT_TRADE_SETTINGS: TradeSettings = {
-  tradeSize: 50,
+  tradeSize: 200,
   minSpread: 2,
   maxSlippage: 1.5,
   riskLevel: 'moderate',

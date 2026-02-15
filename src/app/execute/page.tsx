@@ -206,8 +206,7 @@ export default function ExecutePage() {
               value={settings.tradeSize}
               min={5} max={200} step={5}
               onChange={v => exec.updateSettings({ tradeSize: v })}
-              warn={settings.tradeSize > 50}
-              warnText="⚠️ Above recommended 50 ADA"
+              warn={false}
             />
             <SettingSlider
               label="Min Spread (%)"

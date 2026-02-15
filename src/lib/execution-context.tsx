@@ -109,7 +109,7 @@ export function ExecutionProvider({ children }: { children: ReactNode }) {
     }
 
     // Max trade size: 50 ADA default, configurable
-    const tradeAmount = Math.min(settings.tradeSize, 200) // Hard cap at 200
+    const tradeAmount = settings.tradeSize
 
     const trade: TradeExecution = {
       id: generateTradeId(),
