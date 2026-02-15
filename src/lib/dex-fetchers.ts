@@ -91,7 +91,7 @@ const DEX_GROUPS: { name: string; blacklistOthers: string[] }[] = [
   { name: 'MuesliSwap', blacklistOthers: ['MINSWAP', 'MINSWAPV2', 'MS2HOP', 'SUNDAESWAP', 'SUNDAESWAPV3', 'WINGRIDER', 'WINGRIDERV2', 'VYFI', 'SPLASH', 'CSWAP', 'CHADSWAP', 'SNEKFUN', 'CHAKRA', 'SHADOWBOOK'] },
 ]
 
-async function fetchPerDexPrice(tokenSymbol: string, tokenUnit: string, dexGroup: typeof DEX_GROUPS[0], amountAda: number = 100): Promise<TokenPrice | null> {
+async function fetchPerDexPrice(tokenSymbol: string, tokenUnit: string, dexGroup: typeof DEX_GROUPS[0], amountAda: number = 200): Promise<TokenPrice | null> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (DEXHUNTER_PARTNER_KEY) headers['X-Partner-Id'] = DEXHUNTER_PARTNER_KEY
 
@@ -129,7 +129,7 @@ async function fetchPerDexPrice(tokenSymbol: string, tokenUnit: string, dexGroup
   }
 }
 
-async function fetchDexHunterEstimate(tokenSymbol: string, tokenUnit: string, amountAda: number = 100): Promise<TokenPrice[]> {
+async function fetchDexHunterEstimate(tokenSymbol: string, tokenUnit: string, amountAda: number = 200): Promise<TokenPrice[]> {
   // Query each DEX individually by blacklisting all others
   const results = await Promise.all(
     DEX_GROUPS.map(dg => fetchPerDexPrice(tokenSymbol, tokenUnit, dg, amountAda))

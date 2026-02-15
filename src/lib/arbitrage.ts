@@ -46,16 +46,21 @@ export function findArbOpportunities(
         const spreadPct = ((sell.price - buy.price) / buy.price) * 100
         if (spreadPct < minSpreadPct) continue
 
-        // Calculate profit with REALISTIC fees
+        // Calculate profit with REALISTIC fees + price impact buffer
         const tokensAcquired = tradeSize / buy.price
         const grossReturn = tokensAcquired * sell.price
         
+        // Apply price impact discount: selling large token amounts into a pool
+        // moves the price against you. Estimate ~5% worse than spot for the sell leg.
+        const PRICE_IMPACT_DISCOUNT = 0.95
+        const adjustedReturn = grossReturn * PRICE_IMPACT_DISCOUNT
+        
         // All-in fees for round trip (buy + sell)
         const buyFees = estimateSwapFees(tradeSize)
-        const sellFees = estimateSwapFees(grossReturn)
+        const sellFees = estimateSwapFees(adjustedReturn)
         const totalFees = buyFees + sellFees
         
-        const netProfit = grossReturn - tradeSize - totalFees
+        const netProfit = adjustedReturn - tradeSize - totalFees
 
         const tier: ArbOpportunity['tier'] =
           netProfit > 5 ? 'green' : netProfit > 0 ? 'yellow' : 'red'
@@ -70,7 +75,7 @@ export function findArbOpportunities(
           buyPrice: buy.price,
           sellPrice: sell.price,
           spreadPct,
-          estimatedProfitAda: grossReturn - tradeSize,
+          estimatedProfitAda: adjustedReturn - tradeSize,
           buyLiquidity: buy.liquidity,
           sellLiquidity: sell.liquidity,
           netProfitAda: netProfit,
