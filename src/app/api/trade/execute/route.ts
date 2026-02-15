@@ -244,56 +244,69 @@ export async function POST(req: NextRequest) {
       const { buyDex, sellDex } = body
       const tokenOutUnit = buyUnit === 'lovelace' ? '' : buyUnit
 
-      // === PRE-FLIGHT: Estimate both legs and check profitability ===
-      console.log(`[arb] Pre-flight: estimating ${amount} ADA → ${tokenB} → ADA`)
+      // === PRE-FLIGHT: Try multiple trade sizes to find optimal profitable amount ===
+      const tradeSizes = [amount, 100, 50, 25, 15, 10].filter(s => s <= amount)
+      // Deduplicate and sort descending (prefer larger trades)
+      const uniqueSizes = [...new Set(tradeSizes)].sort((a, b) => b - a)
       
-      const buyEstimate = await estimateSwap('', tokenOutUnit, amount, slippage)
-      if (!buyEstimate) {
-        return NextResponse.json({ success: false, error: 'Failed to estimate buy leg' }, { status: 502 })
+      let bestSize = 0
+      let bestProfit = 0
+      let bestBuyEstimate: Awaited<ReturnType<typeof estimateSwap>> = null
+      let bestSellEstimate: Awaited<ReturnType<typeof estimateSwap>> = null
+      let bestFees = { buy: 0, sell: 0, total: 0 }
+      let lastError = ''
+
+      console.log(`[arb] Pre-flight: trying sizes ${uniqueSizes.join(', ')} ADA for ${tokenB}`)
+
+      for (const trySize of uniqueSizes) {
+        const buyEst = await estimateSwap('', tokenOutUnit, trySize, slippage)
+        if (!buyEst) { lastError = `Failed to estimate buy at ${trySize} ADA`; continue }
+
+        const sellEst = await estimateSwap(tokenOutUnit, '', buyEst.totalOutput, slippage)
+        if (!sellEst) { lastError = `Failed to estimate sell at ${trySize} ADA`; continue }
+
+        const bFees = (buyEst.dexhunterFee || 0) + (buyEst.batcherFee || 0) + 0.3
+        const sFees = (sellEst.dexhunterFee || 0) + (sellEst.batcherFee || 0) + 0.3
+        const tFees = bFees + sFees
+        const ret = sellEst.totalOutput || 0
+        const profit = ret - trySize - tFees
+
+        console.log(`[arb]   ${trySize} ADA → ${buyEst.totalOutput.toFixed(0)} ${tokenB} → ${ret.toFixed(2)} ADA | fees: ${tFees.toFixed(2)} | profit: ${profit.toFixed(2)} ADA`)
+
+        if (profit > bestProfit) {
+          bestSize = trySize
+          bestProfit = profit
+          bestBuyEstimate = buyEst
+          bestSellEstimate = sellEst
+          bestFees = { buy: bFees, sell: sFees, total: tFees }
+        }
       }
 
-      const sellEstimate = await estimateSwap(tokenOutUnit, '', buyEstimate.totalOutput, slippage)
-      if (!sellEstimate) {
-        return NextResponse.json({ success: false, error: 'Failed to estimate sell leg' }, { status: 502 })
-      }
-
-      // Calculate total fees and expected profit
-      const buyFees = (buyEstimate.dexhunterFee || 0) + (buyEstimate.batcherFee || 0) + 0.3 // +0.3 for network fee
-      const sellFees = (sellEstimate.dexhunterFee || 0) + (sellEstimate.batcherFee || 0) + 0.3
-      const totalFees = buyFees + sellFees
-      const expectedReturn = sellEstimate.totalOutput || 0
-      const expectedProfit = expectedReturn - amount - totalFees
-
-      console.log(`[arb] Pre-flight results:`)
-      console.log(`  Buy:  ${amount} ADA → ${buyEstimate.totalOutput} ${tokenB} (fees: ${buyFees.toFixed(2)} ADA)`)
-      console.log(`  Sell: ${buyEstimate.totalOutput} ${tokenB} → ${expectedReturn.toFixed(2)} ADA (fees: ${sellFees.toFixed(2)} ADA)`)
-      console.log(`  Total fees: ${totalFees.toFixed(2)} ADA`)
-      console.log(`  Expected profit: ${expectedProfit.toFixed(2)} ADA`)
-
-      if (expectedProfit <= 0) {
+      if (bestProfit <= 0 || !bestBuyEstimate || !bestSellEstimate) {
         return NextResponse.json({
           success: false,
-          error: `Trade would LOSE money. Expected: ${expectedReturn.toFixed(2)} ADA back from ${amount} ADA invested. Total fees: ${totalFees.toFixed(2)} ADA. Net: ${expectedProfit.toFixed(2)} ADA`,
-          preflight: {
-            buyOutput: buyEstimate.totalOutput,
-            sellOutput: expectedReturn,
-            buyFees,
-            sellFees,
-            totalFees,
-            expectedProfit,
-          },
+          error: `No profitable trade size found for ${tokenPair}. Best was ${bestSize} ADA with ${bestProfit.toFixed(2)} ADA profit. ${lastError}`,
+          preflight: { bestSize, bestProfit, fees: bestFees },
         }, { status: 400 })
       }
 
-      console.log(`[arb] ✅ Pre-flight passed. Expected profit: ${expectedProfit.toFixed(2)} ADA. Executing...`)
+      // Use the best profitable size
+      const finalAmount = bestSize
+      const buyFees = bestFees.buy
+      const sellFees = bestFees.sell
+      const totalFees = bestFees.total
+      const expectedReturn = bestSellEstimate.totalOutput || 0
+      const expectedProfit = bestProfit
 
-      // Step 1: Buy token (ADA → Token)
-      console.log(`[arb] Step 1: Buy ${tokenB} with ${amount} ADA on ${buyDex || 'best'}`)
+      console.log(`[arb] ✅ Best size: ${finalAmount} ADA, expected profit: ${expectedProfit.toFixed(2)} ADA. Executing...`)
+
+      // Step 1: Buy token (ADA → Token) using optimal size
+      console.log(`[arb] Step 1: Buy ${tokenB} with ${finalAmount} ADA on ${buyDex || 'best'}`)
       const buyResult = await buildAndSignSwap(
         lucid, walletAddress,
         '', // ADA in
         buyUnit === 'lovelace' ? '' : buyUnit,
-        amount,
+        finalAmount,
         slippage,
       )
 
@@ -336,7 +349,8 @@ export async function POST(req: NextRequest) {
         sellTxHash: sellResult.txHash,
         buyEstimatedOutput: buyResult.estimatedOutput,
         sellEstimatedOutput: sellResult.estimatedOutput,
-        netProfitAda: (sellResult.estimatedOutput || 0) - amount,
+        netProfitAda: (sellResult.estimatedOutput || 0) - finalAmount,
+        tradeSize: finalAmount,
         fees: {
           buy: buyFees,
           sell: sellFees,

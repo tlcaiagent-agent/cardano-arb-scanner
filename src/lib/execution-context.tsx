@@ -176,9 +176,9 @@ export function ExecutionProvider({ children }: { children: ReactNode }) {
     }
 
     // Min profit check (must clear fees + 1%)
-    // Real round-trip fees: ~3.8 ADA per swap × 2 swaps = ~7.6 ADA + slippage buffer
-    const estimatedFees = 8.0
-    const minProfitRequired = estimatedFees + (settings.tradeSize * 0.01) // fees + 1% of trade size
+    // Let the server-side pre-flight handle profitability checks with real DexHunter estimates.
+    // Just require any positive profit after the pre-flight says yes.
+    const minProfitRequired = 0.1 // Execute if pre-flight confirms even 0.1 ADA profit
     if (opp.netProfitAda < minProfitRequired) {
       setStatusDetail(`Profit ${opp.netProfitAda.toFixed(2)} ₳ below minimum ${minProfitRequired.toFixed(2)} ₳`)
       return
