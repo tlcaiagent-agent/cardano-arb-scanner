@@ -1,5 +1,15 @@
 import { TokenPrice, ArbOpportunity, TriangularArb } from './types'
-import { DEX_FEES, TX_FEE_ADA, DEFAULT_TRADE_SIZE_ADA } from './constants'
+import { TX_FEE_ADA, DEFAULT_TRADE_SIZE_ADA } from './constants'
+
+// Real all-in cost per swap leg:
+// ~0.3 ADA network fee + ~2 ADA batcher fee + ~1.5% DexHunter fee
+const FIXED_FEE_PER_SWAP = 2.5  // batcher + network
+const DEXHUNTER_FEE_PCT = 0.015 // ~1.5% of trade
+const POOL_FEE_PCT = 0.003      // ~0.3% pool swap fee
+
+function estimateSwapFees(amountAda: number): number {
+  return FIXED_FEE_PER_SWAP + (amountAda * DEXHUNTER_FEE_PCT) + (amountAda * POOL_FEE_PCT)
+}
 
 export function findArbOpportunities(
   prices: TokenPrice[],
@@ -32,15 +42,19 @@ export function findArbOpportunities(
         const spreadPct = ((sell.price - buy.price) / buy.price) * 100
         if (spreadPct < minSpreadPct) continue
 
-        // Calculate profit
+        // Calculate profit with REALISTIC fees
         const tokensAcquired = tradeSize / buy.price
         const grossReturn = tokensAcquired * sell.price
-        const buyFee = tradeSize * (DEX_FEES[buy.dex] || 0.003)
-        const sellFee = grossReturn * (DEX_FEES[sell.dex] || 0.003)
-        const netProfit = grossReturn - tradeSize - buyFee - sellFee - TX_FEE_ADA * 2
+        
+        // All-in fees for round trip (buy + sell)
+        const buyFees = estimateSwapFees(tradeSize)
+        const sellFees = estimateSwapFees(grossReturn)
+        const totalFees = buyFees + sellFees
+        
+        const netProfit = grossReturn - tradeSize - totalFees
 
         const tier: ArbOpportunity['tier'] =
-          spreadPct > 2 ? 'green' : spreadPct > 1 ? 'yellow' : 'red'
+          netProfit > 5 ? 'green' : netProfit > 0 ? 'yellow' : 'red'
 
         opps.push({
           id: `${pair}-${buy.dex}-${sell.dex}`,
@@ -63,7 +77,7 @@ export function findArbOpportunities(
     }
   }
 
-  return opps.sort((a, b) => b.spreadPct - a.spreadPct)
+  return opps.sort((a, b) => b.netProfitAda - a.netProfitAda)
 }
 
 export function findTriangularArbs(
@@ -81,31 +95,25 @@ export function findTriangularArbs(
   const tokens = [...new Set(prices.map(p => p.tokenB))]
 
   for (const [dex, pairMap] of byDex) {
-    // Try ADA -> X -> Y -> ADA
     for (const tokenB of tokens) {
       for (const tokenC of tokens) {
         if (tokenB === tokenC) continue
 
         const leg1 = pairMap.get(`ADA/${tokenB}`)
-        const leg2Key = `${tokenB}/${tokenC}`
-        const leg2Alt = `ADA/${tokenC}`
         const leg3 = pairMap.get(`ADA/${tokenC}`)
 
-        // Simplified: ADA->B (buy B), if B->C exists, then C->ADA (sell C)
-        // For demo we simulate with ADA pairs only
         if (!leg1 || !leg3) continue
         if (leg1.price === 0 || leg3.price === 0) continue
 
-        // ADA -> tokenB -> tokenC -> ADA
-        // Buy tokenB with ADA, convert tokenB to tokenC (simulated), sell tokenC for ADA
         const bAmount = tradeSize / leg1.price
-        // Simulate B->C conversion with a small random spread
         const cAmount = bAmount * (leg1.price / leg3.price) * (1 + (Math.random() - 0.5) * 0.02)
         const returnAda = cAmount * leg3.price
-        const fees = tradeSize * 0.003 * 3 + TX_FEE_ADA * 3
+        
+        // 3 swap legs with realistic fees
+        const fees = estimateSwapFees(tradeSize) + estimateSwapFees(returnAda * 0.5) + estimateSwapFees(returnAda)
         const profitPct = ((returnAda - tradeSize - fees) / tradeSize) * 100
 
-        if (profitPct > -1 && profitPct < 5) {
+        if (profitPct > -5 && profitPct < 10) {
           results.push({
             id: `tri-${dex}-ADA-${tokenB}-${tokenC}`,
             dex,

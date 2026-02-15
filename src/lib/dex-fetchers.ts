@@ -75,16 +75,16 @@ const ESTIMATE_TOKENS: { symbol: string; unit: string }[] = Object.entries(TOKEN
   ([symbol, { policyId, assetName }]) => ({ symbol, unit: policyId + assetName })
 )
 
-async function fetchDexHunterEstimate(tokenSymbol: string, tokenUnit: string, amountLovelace: number = 5_000_000): Promise<TokenPrice[]> {
+async function fetchDexHunterEstimate(tokenSymbol: string, tokenUnit: string, amountAda: number = 100): Promise<TokenPrice[]> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (DEXHUNTER_PARTNER_KEY) headers['X-Partner-Id'] = DEXHUNTER_PARTNER_KEY
 
+  // DexHunter takes amounts in ADA (NOT lovelace)
   const body = {
     token_in: '',  // ADA
     token_out: tokenUnit,
-    amount_in: amountLovelace,
+    amount_in: amountAda,
     slippage: 2,
-    buyer_address: 'addr1qx2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer3jcu5d8ps7zex2k2xt3uqxgjqnnj83ws8lhrn648jjxtwq2ytjqp',
     blacklisted_dexes: [],
   }
 
@@ -114,8 +114,8 @@ async function fetchDexHunterEstimate(tokenSymbol: string, tokenUnit: string, am
 
   for (const [dex, { totalIn, totalOut }] of dexPrices) {
     if (totalOut <= 0 || totalIn <= 0) continue
-    // Price = ADA per token = (totalIn lovelace / 1e6) / totalOut
-    const priceAdaPerToken = (totalIn / 1_000_000) / totalOut
+    // Price = ADA per token (totalIn is already in ADA)
+    const priceAdaPerToken = totalIn / totalOut
     prices.push({
       tokenA: 'ADA',
       tokenB: tokenSymbol,
