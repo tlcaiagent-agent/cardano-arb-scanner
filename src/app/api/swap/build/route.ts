@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 
-const DEXHUNTER_API = 'https://api-us.dexhunter.io/community'
+const DEXHUNTER_API = 'https://api-us.dexhunterv3.app'
+const DEXHUNTER_PARTNER_KEY = process.env.DEXHUNTER_API_KEY || ''
 const MUESLI_API = 'https://api.muesliswap.com'
 
 // Same token units as client-side
@@ -35,17 +36,20 @@ export async function POST(req: NextRequest) {
     // Try DexHunter
     try {
       const dexHunterBody = {
-        address: walletAddress,
-        sell_token: sellUnit,
-        buy_token: buyUnit,
-        sell_amount: sellAmount.toString(),
+        buyer_address: walletAddress,
+        token_in: sellUnit === 'lovelace' ? '' : sellUnit,
+        token_out: buyUnit === 'lovelace' ? '' : buyUnit,
+        amount_in: parseInt(sellAmount.toString()),
         slippage: slippagePct,
-        ...(dex ? { dex: dex.toLowerCase() } : {}),
+        blacklisted_dexes: [],
       }
+
+      const dexHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (DEXHUNTER_PARTNER_KEY) dexHeaders['X-Partner-Id'] = DEXHUNTER_PARTNER_KEY
 
       const resp = await fetch(`${DEXHUNTER_API}/swap/build`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: dexHeaders,
         body: JSON.stringify(dexHunterBody),
       })
 

@@ -13,8 +13,9 @@
 
 import { WalletAPI } from './wallet'
 
-// DexHunter community API
-const DEXHUNTER_API = 'https://api-us.dexhunter.io/community'
+// DexHunter v3 API
+const DEXHUNTER_API = 'https://api-us.dexhunterv3.app'
+const DEXHUNTER_PARTNER_KEY = typeof process !== 'undefined' ? (process.env?.DEXHUNTER_API_KEY || '') : ''
 const BLOCKFROST_URL = 'https://cardano-mainnet.blockfrost.io/api/v0'
 
 // Token unit format: policyId + assetName hex, or "lovelace" for ADA
@@ -79,20 +80,23 @@ export async function buildSwapTx(params: SwapParams): Promise<SwapBuildResult> 
 
   // Try DexHunter community API
   try {
-    const body = {
-      address: params.walletAddress,
-      sell_token: sellUnit,
-      buy_token: buyUnit,
-      sell_amount: params.sellAmount.toString(),
+    const body: Record<string, unknown> = {
+      buyer_address: params.walletAddress,
+      token_in: sellUnit === 'lovelace' ? '' : sellUnit,
+      token_out: buyUnit === 'lovelace' ? '' : buyUnit,
+      amount_in: params.sellAmount,
       slippage: params.slippagePct,
-      ...(params.dex ? { dex: params.dex.toLowerCase() } : {}),
+      blacklisted_dexes: [],
     }
 
     console.log('[SwapExecutor] Building swap via DexHunter:', JSON.stringify(body))
 
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (DEXHUNTER_PARTNER_KEY) headers['X-Partner-Id'] = DEXHUNTER_PARTNER_KEY
+
     const resp = await fetch(`${DEXHUNTER_API}/swap/build`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body),
     })
 

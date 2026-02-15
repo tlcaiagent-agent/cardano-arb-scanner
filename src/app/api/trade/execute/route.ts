@@ -9,7 +9,8 @@ import { NextRequest, NextResponse } from 'next/server'
  * Returns: { success, txHash, ... }
  */
 
-const DEXHUNTER_API = 'https://api-us.dexhunter.io/community'
+const DEXHUNTER_API = 'https://api-us.dexhunterv3.app'
+const DEXHUNTER_PARTNER_KEY = process.env.DEXHUNTER_API_KEY || ''
 const BLOCKFROST_URL = 'https://cardano-mainnet.blockfrost.io/api/v0'
 const BLOCKFROST_KEY = process.env.BLOCKFROST_API_KEY || ''
 
@@ -115,21 +116,24 @@ export async function POST(req: NextRequest) {
 
     const sellAmount = tokenA === 'ADA' ? Math.floor(amount * 1_000_000) : amount
 
-    // Build swap tx via DexHunter
+    // Build swap tx via DexHunter v3
     const buildBody = {
-      address: walletAddress,
-      sell_token: sellUnit,
-      buy_token: buyUnit,
-      sell_amount: sellAmount.toString(),
+      buyer_address: walletAddress,
+      token_in: sellUnit === 'lovelace' ? '' : sellUnit,
+      token_out: buyUnit === 'lovelace' ? '' : buyUnit,
+      amount_in: sellAmount,
       slippage: slippage,
-      ...(dex ? { dex: dex.toLowerCase() } : {}),
+      blacklisted_dexes: [],
     }
 
     console.log('[trade/execute] Building swap via DexHunter for', tokenPair, 'amount:', amount, 'ADA')
 
+    const buildHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (DEXHUNTER_PARTNER_KEY) buildHeaders['X-Partner-Id'] = DEXHUNTER_PARTNER_KEY
+
     const buildResp = await fetch(`${DEXHUNTER_API}/swap/build`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: buildHeaders,
       body: JSON.stringify(buildBody),
     })
 
@@ -156,7 +160,37 @@ export async function POST(req: NextRequest) {
     console.log('[trade/execute] Signing transaction server-side...')
     const tx = lucid.fromTx(txCbor)
     const signedTx = await tx.sign().complete()
-    const txHash = await signedTx.submit()
+
+    // Try submitting via DexHunter /swap/sign endpoint first
+    let txHash: string | undefined
+    try {
+      const signHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (DEXHUNTER_PARTNER_KEY) signHeaders['X-Partner-Id'] = DEXHUNTER_PARTNER_KEY
+
+      const signResp = await fetch(`${DEXHUNTER_API}/swap/sign`, {
+        method: 'POST',
+        headers: signHeaders,
+        body: JSON.stringify({
+          txCbor: signedTx.toString(),
+          signatures: [],
+        }),
+      })
+      if (signResp.ok) {
+        const signData = await signResp.json()
+        if (signData.txHash || signData.tx_hash) {
+          txHash = signData.txHash || signData.tx_hash
+          console.log('[trade/execute] Submitted via DexHunter sign:', txHash)
+        }
+      }
+    } catch (e) {
+      console.warn('[trade/execute] DexHunter sign endpoint failed, falling back to direct submit:', e)
+    }
+
+    // Fallback: submit directly via Lucid/Blockfrost
+    if (!txHash) {
+      txHash = await signedTx.submit()
+      console.log('[trade/execute] Submitted via Blockfrost:', txHash)
+    }
 
     console.log('[trade/execute] Transaction submitted:', txHash)
 

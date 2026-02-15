@@ -1,5 +1,6 @@
 import { TokenPrice, DexStatus } from './types'
 import { STALE_THRESHOLD_MS } from './constants'
+import { TOKEN_POLICY_IDS } from './constants'
 
 interface FetchResult {
   prices: TokenPrice[]
@@ -14,12 +15,8 @@ function getCached(dex: string): FetchResult | null {
   const c = dexCache.get(dex)
   if (!c) return null
   if (Date.now() - c.ts < DEX_CACHE_TTL) return c.result
-  // Mark stale but still return
   if (Date.now() - c.ts < STALE_THRESHOLD_MS) {
-    return {
-      ...c.result,
-      status: { ...c.result.status, status: 'stale' }
-    }
+    return { ...c.result, status: { ...c.result.status, status: 'stale' } }
   }
   return null
 }
@@ -28,7 +25,7 @@ function setCache(dex: string, result: FetchResult) {
   dexCache.set(dex, { result, ts: Date.now() })
 }
 
-async function fetchWithTimeout(url: string, opts: RequestInit = {}, ms = 5000): Promise<Response> {
+async function fetchWithTimeout(url: string, opts: RequestInit = {}, ms = 8000): Promise<Response> {
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), ms)
   try {
@@ -38,7 +35,7 @@ async function fetchWithTimeout(url: string, opts: RequestInit = {}, ms = 5000):
   }
 }
 
-// ─── Known token symbols by partial matching ───
+// ─── Known token symbols ───
 const TRACKED_SYMBOLS = new Set([
   'HOSKY', 'MIN', 'SUNDAE', 'WRT', 'SNEK', 'INDY', 'LENFI',
   'DJED', 'IUSD', 'iUSD', 'MILK', 'AGIX', 'WMT', 'NMKR', 'JPG', 'GENS',
@@ -52,12 +49,153 @@ function normalizeSymbol(s: string): string {
   return up
 }
 
-function isTracked(symbol: string): boolean {
-  if (!symbol) return false
-  return TRACKED_SYMBOLS.has(symbol.toUpperCase()) || TRACKED_SYMBOLS.has(symbol)
+// ─── DexHunter v3 API - Primary price source ───
+// Uses /swap/estimate to get prices across ALL DEXes in one call
+const DEXHUNTER_API = 'https://api-us.dexhunterv3.app'
+const DEXHUNTER_PARTNER_KEY = process.env.DEXHUNTER_API_KEY || ''
+
+// Map DEX names from DexHunter splits to our display names
+const DEX_NAME_MAP: Record<string, string> = {
+  'MINSWAP': 'Minswap',
+  'MINSWAPV2': 'Minswap',
+  'SUNDAESWAP': 'SundaeSwap',
+  'WINGRIDERS': 'WingRiders',
+  'MUESLISWAP': 'MuesliSwap',
+  'VYFI': 'VyFi',
+  'SPECTRUM': 'Spectrum',
+  'MS2HOP': 'MuesliSwap',
 }
 
-// ─── MuesliSwap ───
+function mapDexName(raw: string): string {
+  return DEX_NAME_MAP[raw] || raw
+}
+
+// Tokens to query via DexHunter estimate (their unit = policyId+hex)
+const ESTIMATE_TOKENS: { symbol: string; unit: string }[] = Object.entries(TOKEN_POLICY_IDS).map(
+  ([symbol, { policyId, assetName }]) => ({ symbol, unit: policyId + assetName })
+)
+
+async function fetchDexHunterEstimate(tokenSymbol: string, tokenUnit: string, amountLovelace: number = 5_000_000): Promise<TokenPrice[]> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (DEXHUNTER_PARTNER_KEY) headers['X-Partner-Id'] = DEXHUNTER_PARTNER_KEY
+
+  const body = {
+    token_in: '',  // ADA
+    token_out: tokenUnit,
+    amount_in: amountLovelace,
+    slippage: 2,
+    buyer_address: 'addr1qx2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer3jcu5d8ps7zex2k2xt3uqxgjqnnj83ws8lhrn648jjxtwq2ytjqp',
+    blacklisted_dexes: [],
+  }
+
+  const resp = await fetchWithTimeout(`${DEXHUNTER_API}/swap/estimate`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  })
+
+  if (!resp.ok) return []
+  const data = await resp.json()
+  const splits = data.splits || []
+  const prices: TokenPrice[] = []
+
+  // Group splits by DEX and calculate effective price
+  const dexPrices = new Map<string, { totalIn: number; totalOut: number }>()
+  for (const split of splits) {
+    const dexRaw = split.dex || ''
+    const dexName = mapDexName(dexRaw)
+    if (!dexName) continue
+
+    const existing = dexPrices.get(dexName) || { totalIn: 0, totalOut: 0 }
+    existing.totalIn += split.amount_in || 0
+    existing.totalOut += split.expected_output || 0
+    dexPrices.set(dexName, existing)
+  }
+
+  for (const [dex, { totalIn, totalOut }] of dexPrices) {
+    if (totalOut <= 0 || totalIn <= 0) continue
+    // Price = ADA per token = (totalIn lovelace / 1e6) / totalOut
+    const priceAdaPerToken = (totalIn / 1_000_000) / totalOut
+    prices.push({
+      tokenA: 'ADA',
+      tokenB: tokenSymbol,
+      pair: `ADA/${tokenSymbol}`,
+      dex,
+      price: priceAdaPerToken,
+      liquidity: totalOut,
+      timestamp: Date.now(),
+    })
+  }
+
+  // Also add the aggregate "best" price from DexHunter
+  if (data.net_price && data.net_price > 0) {
+    prices.push({
+      tokenA: 'ADA',
+      tokenB: tokenSymbol,
+      pair: `ADA/${tokenSymbol}`,
+      dex: 'DexHunter',
+      price: data.net_price,
+      liquidity: data.total_output || 0,
+      timestamp: Date.now(),
+    })
+  }
+
+  return prices
+}
+
+/**
+ * Fetch prices for all tracked tokens via DexHunter estimate endpoint.
+ * This gives us per-DEX pricing across all Cardano DEXes in a reliable way.
+ */
+async function fetchAllViaDexHunter(): Promise<FetchResult> {
+  const cached = getCached('DexHunterAll')
+  if (cached) return cached
+  const start = Date.now()
+
+  try {
+    // Fetch estimates for all tracked tokens in parallel (with concurrency limit)
+    const allPrices: TokenPrice[] = []
+    const batchSize = 4
+    for (let i = 0; i < ESTIMATE_TOKENS.length; i += batchSize) {
+      const batch = ESTIMATE_TOKENS.slice(i, i + batchSize)
+      const results = await Promise.allSettled(
+        batch.map(t => fetchDexHunterEstimate(t.symbol, t.unit))
+      )
+      for (const r of results) {
+        if (r.status === 'fulfilled') allPrices.push(...r.value)
+      }
+    }
+
+    if (allPrices.length === 0) throw new Error('No prices from DexHunter estimates')
+
+    const result: FetchResult = {
+      prices: allPrices,
+      status: {
+        name: 'DexHunter',
+        status: 'live',
+        lastUpdate: Date.now(),
+        pairCount: allPrices.length,
+        responseTimeMs: Date.now() - start,
+      },
+    }
+    setCache('DexHunterAll', result)
+    return result
+  } catch (e) {
+    console.error('[DexHunter] fetch failed:', e instanceof Error ? e.message : e)
+    return {
+      prices: demoDataForAllDexes(),
+      status: {
+        name: 'DexHunter',
+        status: 'demo',
+        lastUpdate: Date.now(),
+        pairCount: 0,
+        responseTimeMs: Date.now() - start,
+      },
+    }
+  }
+}
+
+// ─── MuesliSwap direct (fallback) ───
 async function fetchMuesliSwap(): Promise<FetchResult> {
   const dex = 'MuesliSwap'
   const cached = getCached(dex)
@@ -94,203 +232,6 @@ async function fetchMuesliSwap(): Promise<FetchResult> {
     return result
   } catch (e) {
     console.error(`[${dex}] fetch failed:`, e instanceof Error ? e.message : e)
-    return { prices: demoDataForDex(dex), status: { name: dex, status: 'demo', lastUpdate: Date.now(), pairCount: 0, responseTimeMs: Date.now() - start } }
-  }
-}
-
-// ─── DexHunter ───
-async function fetchDexHunter(): Promise<FetchResult> {
-  const dex = 'DexHunter'
-  const cached = getCached(dex)
-  if (cached) return cached
-  const start = Date.now()
-  try {
-    const resp = await fetchWithTimeout('https://api-us.dexhunter.io/community/pairs', {
-      headers: { 'Accept': 'application/json' }
-    })
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    const data = await resp.json()
-    const prices: TokenPrice[] = []
-    const pairs = Array.isArray(data) ? data : data?.pairs || data?.data || []
-    for (const item of pairs) {
-      const symbol = normalizeSymbol(item.token_b?.symbol || item.tokenB?.symbol || item.symbol || '')
-      if (!symbol) continue
-      const price = parseFloat(item.price || item.last_price || '0')
-      if (!price || !isFinite(price)) continue
-      prices.push({
-        tokenA: 'ADA', tokenB: symbol,
-        pair: `ADA/${symbol}`, dex,
-        price, liquidity: parseFloat(item.tvl || item.liquidity || '5000'),
-        timestamp: Date.now(),
-      })
-    }
-    if (prices.length === 0) throw new Error('No prices parsed')
-    const result: FetchResult = {
-      prices,
-      status: { name: dex, status: 'live', lastUpdate: Date.now(), pairCount: prices.length, responseTimeMs: Date.now() - start }
-    }
-    setCache(dex, result)
-    return result
-  } catch (e) {
-    console.error(`[${dex}] fetch failed:`, e instanceof Error ? e.message : e)
-    // DexHunter doesn't get demo fallback — it's supplementary
-    return { prices: [], status: { name: dex, status: 'demo', lastUpdate: Date.now(), pairCount: 0, responseTimeMs: Date.now() - start } }
-  }
-}
-
-// ─── Minswap ───
-async function fetchMinswap(): Promise<FetchResult> {
-  const dex = 'Minswap'
-  const cached = getCached(dex)
-  if (cached) return cached
-  const start = Date.now()
-  try {
-    const resp = await fetchWithTimeout('https://api-mainnet-prod.minswap.org/commerce/pools?page=1&limit=30', {
-      headers: { 'Accept': 'application/json' }
-    })
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    const data = await resp.json()
-    const prices: TokenPrice[] = []
-    const pools = Array.isArray(data) ? data : data?.data || data?.pools || []
-    for (const pool of pools) {
-      const symbol = normalizeSymbol(pool?.tokenB?.symbol || pool?.pair?.split('/')[1] || '')
-      const price = parseFloat(pool?.price || pool?.tokenBPrice || '0')
-      if (!symbol || !price || !isFinite(price)) continue
-      prices.push({
-        tokenA: 'ADA', tokenB: symbol,
-        pair: `ADA/${symbol}`, dex,
-        price, liquidity: parseFloat(pool?.tvl || pool?.liquidity || '5000'),
-        timestamp: Date.now(),
-      })
-    }
-    if (prices.length === 0) throw new Error('No prices parsed')
-    const result: FetchResult = {
-      prices,
-      status: { name: dex, status: 'live', lastUpdate: Date.now(), pairCount: prices.length, responseTimeMs: Date.now() - start }
-    }
-    setCache(dex, result)
-    return result
-  } catch (e) {
-    console.error(`[${dex}] fetch failed:`, e instanceof Error ? e.message : e)
-    return { prices: demoDataForDex(dex), status: { name: dex, status: 'demo', lastUpdate: Date.now(), pairCount: 0, responseTimeMs: Date.now() - start } }
-  }
-}
-
-// ─── SundaeSwap ───
-async function fetchSundaeSwap(): Promise<FetchResult> {
-  const dex = 'SundaeSwap'
-  const cached = getCached(dex)
-  if (cached) return cached
-  const start = Date.now()
-  try {
-    const resp = await fetchWithTimeout('https://stats.sundaeswap.finance/api/v1/pools', {
-      headers: { 'Accept': 'application/json' }
-    })
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    const data = await resp.json()
-    const prices: TokenPrice[] = []
-    const pools = Array.isArray(data) ? data : data?.pools || []
-    for (const pool of pools.slice(0, 30)) {
-      const symbol = normalizeSymbol(pool?.tokenB?.ticker || pool?.pair?.split('/')[1] || '')
-      const price = parseFloat(pool?.price || '0')
-      if (!symbol || !price || !isFinite(price)) continue
-      prices.push({
-        tokenA: 'ADA', tokenB: symbol,
-        pair: `ADA/${symbol}`, dex,
-        price, liquidity: parseFloat(pool?.tvl || '5000'),
-        timestamp: Date.now(),
-      })
-    }
-    if (prices.length === 0) throw new Error('No prices parsed')
-    const result: FetchResult = {
-      prices,
-      status: { name: dex, status: 'live', lastUpdate: Date.now(), pairCount: prices.length, responseTimeMs: Date.now() - start }
-    }
-    setCache(dex, result)
-    return result
-  } catch (e) {
-    console.error(`[${dex}] fetch failed:`, e instanceof Error ? e.message : e)
-    return { prices: demoDataForDex(dex), status: { name: dex, status: 'demo', lastUpdate: Date.now(), pairCount: 0, responseTimeMs: Date.now() - start } }
-  }
-}
-
-// ─── WingRiders ───
-async function fetchWingRiders(): Promise<FetchResult> {
-  const dex = 'WingRiders'
-  const cached = getCached(dex)
-  if (cached) return cached
-  const start = Date.now()
-  try {
-    const resp = await fetchWithTimeout('https://api.wingriders.com/graphql', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        query: `{ pools(first: 20) { tokenA { symbol } tokenB { symbol } price tvl } }`
-      })
-    })
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    const json = await resp.json()
-    const pools = json?.data?.pools || []
-    const prices: TokenPrice[] = []
-    for (const pool of pools) {
-      const symbol = normalizeSymbol(pool?.tokenB?.symbol || '')
-      const price = parseFloat(pool?.price || '0')
-      if (!symbol || !price || !isFinite(price)) continue
-      prices.push({
-        tokenA: 'ADA', tokenB: symbol,
-        pair: `ADA/${symbol}`, dex,
-        price, liquidity: parseFloat(pool?.tvl || '5000'),
-        timestamp: Date.now(),
-      })
-    }
-    if (prices.length === 0) throw new Error('No prices parsed')
-    const result: FetchResult = {
-      prices,
-      status: { name: dex, status: 'live', lastUpdate: Date.now(), pairCount: prices.length, responseTimeMs: Date.now() - start }
-    }
-    setCache(dex, result)
-    return result
-  } catch (e) {
-    console.error(`[${dex}] fetch failed:`, e instanceof Error ? e.message : e)
-    return { prices: demoDataForDex(dex), status: { name: dex, status: 'demo', lastUpdate: Date.now(), pairCount: 0, responseTimeMs: Date.now() - start } }
-  }
-}
-
-// ─── CoinGecko fallback ───
-async function fetchCoinGecko(): Promise<FetchResult> {
-  const dex = 'CoinGecko'
-  const cached = getCached(dex)
-  if (cached) return cached
-  const start = Date.now()
-  try {
-    const resp = await fetchWithTimeout('https://api.coingecko.com/api/v3/coins/cardano/tickers?include_exchange_logo=false&depth=true', {
-      headers: { 'Accept': 'application/json' }
-    })
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    const data = await resp.json()
-    const prices: TokenPrice[] = []
-    const tickers = data?.tickers || []
-    for (const t of tickers) {
-      if (t.base !== 'ADA') continue
-      const symbol = normalizeSymbol(t.target || '')
-      if (!symbol || symbol === 'USD' || symbol === 'USDT' || symbol === 'BTC' || symbol === 'ETH') continue
-      const price = parseFloat(t.last || '0')
-      if (!price || !isFinite(price)) continue
-      prices.push({
-        tokenA: 'ADA', tokenB: symbol,
-        pair: `ADA/${symbol}`, dex: t.market?.name || 'CoinGecko',
-        price, liquidity: parseFloat(t.volume || '1000'),
-        timestamp: Date.now(),
-      })
-    }
-    const result: FetchResult = {
-      prices,
-      status: { name: dex, status: prices.length > 0 ? 'live' : 'demo', lastUpdate: Date.now(), pairCount: prices.length, responseTimeMs: Date.now() - start }
-    }
-    if (prices.length > 0) setCache(dex, result)
-    return result
-  } catch (e) {
-    console.error(`[${dex}] fetch failed:`, e instanceof Error ? e.message : e)
     return { prices: [], status: { name: dex, status: 'demo', lastUpdate: Date.now(), pairCount: 0, responseTimeMs: Date.now() - start } }
   }
 }
@@ -311,25 +252,29 @@ function demoDataForDex(dex: string): TokenPrice[] {
   const jitter = () => (Math.random() - 0.5) * 0.015
 
   return Object.entries(basePrices).map(([symbol, base]) => ({
-    tokenA: 'ADA',
-    tokenB: symbol,
-    pair: `ADA/${symbol}`,
-    dex,
+    tokenA: 'ADA', tokenB: symbol, pair: `ADA/${symbol}`, dex,
     price: base * (1 + offset + jitter()),
     liquidity: 5000 + Math.random() * 95000,
     timestamp: Date.now(),
   }))
 }
 
+function demoDataForAllDexes(): TokenPrice[] {
+  return [
+    ...demoDataForDex('Minswap'),
+    ...demoDataForDex('SundaeSwap'),
+    ...demoDataForDex('WingRiders'),
+    ...demoDataForDex('MuesliSwap'),
+  ]
+}
+
 // ─── Main fetch-all ───
 export async function fetchAllPrices(): Promise<{ prices: TokenPrice[]; statuses: DexStatus[] }> {
+  // Primary: use DexHunter estimate which gives us per-DEX pricing
+  // Fallback: MuesliSwap direct API
   const results = await Promise.allSettled([
+    fetchAllViaDexHunter(),
     fetchMuesliSwap(),
-    fetchMinswap(),
-    fetchSundaeSwap(),
-    fetchWingRiders(),
-    fetchDexHunter(),
-    fetchCoinGecko(),
   ])
 
   const prices: TokenPrice[] = []
@@ -342,5 +287,16 @@ export async function fetchAllPrices(): Promise<{ prices: TokenPrice[]; statuses
     }
   }
 
-  return { prices, statuses }
+  // Deduplicate: if DexHunter gave us prices for a dex+pair, skip MuesliSwap's version
+  const seen = new Set<string>()
+  const deduped: TokenPrice[] = []
+  for (const p of prices) {
+    const key = `${p.dex}:${p.pair}`
+    if (!seen.has(key)) {
+      seen.add(key)
+      deduped.push(p)
+    }
+  }
+
+  return { prices: deduped, statuses }
 }
