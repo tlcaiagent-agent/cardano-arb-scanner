@@ -117,7 +117,13 @@ export interface TradeRecord {
   spreadPct: number
   profitAda: number
   amount: number
-  status: 'planned' | 'executed' | 'failed' | 'manual'
+  status: 'planned' | 'executed' | 'failed' | 'manual' | 'dry-run'
+  buyPrice?: number
+  sellPrice?: number
+  fees?: number
+  buyTxHash?: string
+  sellTxHash?: string
+  dryRun?: boolean
 }
 
 export interface ExecutionConfig {
