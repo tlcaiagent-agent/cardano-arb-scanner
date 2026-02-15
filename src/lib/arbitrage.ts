@@ -7,6 +7,10 @@ const FIXED_FEE_PER_SWAP = 2.5  // batcher + network
 const DEXHUNTER_FEE_PCT = 0.015 // ~1.5% of trade
 const POOL_FEE_PCT = 0.003      // ~0.3% pool swap fee
 
+// Minimum liquidity: pool must have enough tokens to handle our trade
+// without extreme slippage (at least 5x our trade size in token liquidity)
+const MIN_LIQUIDITY_MULTIPLIER = 5
+
 function estimateSwapFees(amountAda: number): number {
   return FIXED_FEE_PER_SWAP + (amountAda * DEXHUNTER_FEE_PCT) + (amountAda * POOL_FEE_PCT)
 }
@@ -41,6 +45,13 @@ export function findArbOpportunities(
 
         const spreadPct = ((sell.price - buy.price) / buy.price) * 100
         if (spreadPct < minSpreadPct) continue
+
+        // Skip if either pool has insufficient liquidity
+        // Liquidity is in token units — estimate ADA value
+        const buyLiqAda = (buy.liquidity || 0) * buy.price
+        const sellLiqAda = (sell.liquidity || 0) * sell.price
+        const minLiqRequired = tradeSize * MIN_LIQUIDITY_MULTIPLIER
+        if (buyLiqAda < minLiqRequired || sellLiqAda < minLiqRequired) continue
 
         // Calculate profit with REALISTIC fees
         const tokensAcquired = tradeSize / buy.price

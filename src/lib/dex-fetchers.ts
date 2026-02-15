@@ -58,12 +58,18 @@ const DEXHUNTER_PARTNER_KEY = process.env.DEXHUNTER_API_KEY || ''
 const DEX_NAME_MAP: Record<string, string> = {
   'MINSWAP': 'Minswap',
   'MINSWAPV2': 'Minswap',
+  'MS2HOP': 'Minswap',
   'SUNDAESWAP': 'SundaeSwap',
+  'SUNDAESWAPV3': 'SundaeSwap',
+  'WINGRIDER': 'WingRiders',
   'WINGRIDERS': 'WingRiders',
+  'WINGRIDERV2': 'WingRiders',
   'MUESLISWAP': 'MuesliSwap',
   'VYFI': 'VyFi',
   'SPECTRUM': 'Spectrum',
-  'MS2HOP': 'MuesliSwap',
+  'SPLASH': 'Splash',
+  'CSWAP': 'CSWAP',
+  'CHADSWAP': 'ChadSwap',
 }
 
 function mapDexName(raw: string): string {
@@ -127,18 +133,9 @@ async function fetchDexHunterEstimate(tokenSymbol: string, tokenUnit: string, am
     })
   }
 
-  // Also add the aggregate "best" price from DexHunter
-  if (data.net_price && data.net_price > 0) {
-    prices.push({
-      tokenA: 'ADA',
-      tokenB: tokenSymbol,
-      pair: `ADA/${tokenSymbol}`,
-      dex: 'DexHunter',
-      price: data.net_price,
-      liquidity: data.total_output || 0,
-      timestamp: Date.now(),
-    })
-  }
+  // NOTE: Do NOT add DexHunter aggregate price as a "DEX" — it's a composite
+  // of all DEXes and can't be traded against individually. Including it creates
+  // false arbitrage signals (aggregate vs single DEX spread).
 
   return prices
 }
