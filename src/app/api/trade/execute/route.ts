@@ -114,7 +114,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: `Unknown token in pair: ${tokenPair}` }, { status: 400 })
     }
 
-    const sellAmount = tokenA === 'ADA' ? Math.floor(amount * 1_000_000) : amount
+    // DexHunter takes amounts in ADA (not lovelace)
+    const sellAmount = amount
 
     // Build swap tx via DexHunter v3
     const buildBody = {

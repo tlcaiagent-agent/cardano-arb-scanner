@@ -252,13 +252,12 @@ export async function executeArbitrage(
 
   // Step 1: Build buy swap (ADA → Token on cheaper DEX)
   onStatus('building-buy', `Building swap: ${amountAda} ADA → ${tokenB} on ${buyDex}`)
-  const amountLovelace = Math.floor(amountAda * 1_000_000)
-
+  // DexHunter takes amounts in ADA, not lovelace
   const buyBuild = await buildSwapTx({
     walletAddress,
     sellToken: tokenA,
     buyToken: tokenB,
-    sellAmount: amountLovelace,
+    sellAmount: amountAda,
     slippagePct,
     dex: buyDex,
   })
@@ -305,7 +304,7 @@ export async function executeArbitrage(
 
   // Step 4: Build sell swap (Token → ADA on more expensive DEX)
   // We need to figure out how many tokens we got — estimate from build output
-  const tokensReceived = buyBuild.estimatedOutput || amountLovelace
+  const tokensReceived = buyBuild.estimatedOutput || amountAda
 
   const sellBuild = await buildSwapTx({
     walletAddress,
