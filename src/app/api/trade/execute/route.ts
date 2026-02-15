@@ -5,8 +5,12 @@ import { NextRequest, NextResponse } from 'next/server'
  * Signs transactions with seed phrase from env var — no browser wallet needed.
  * 
  * POST /api/trade/execute
- * Body: { dex, tokenPair, amount, slippage }
- * Returns: { success, txHash, ... }
+ * Body: { dex, tokenPair, amount, slippage, rawAmount? }
+ *   - tokenPair: "ADA/MIN" or "MIN/ADA" etc
+ *   - amount: amount in human-readable units (ADA for ADA sells)
+ *   - rawAmount: optional raw on-chain amount for token sells (bypasses conversion)
+ *   - slippage: percentage e.g. 2 for 2%
+ * Returns: { success, txHash, estimatedOutput, ... }
  */
 
 const DEXHUNTER_API = 'https://api-us.dexhunterv3.app'
@@ -37,75 +41,134 @@ const TOKEN_UNITS: Record<string, string> = {
   GENS: 'dda5fdb1002f7389b33e036b6afee82a8189becb6cba852e8b79b4fb47454e53',
 }
 
-async function getWalletAddress(): Promise<string> {
-  const seedPhrase = process.env.CARDANO_SEED_PHRASE
-  if (!seedPhrase) throw new Error('Server wallet not configured')
+// Reverse lookup: unit → symbol
+const UNIT_TO_SYMBOL: Record<string, string> = {}
+for (const [sym, unit] of Object.entries(TOKEN_UNITS)) {
+  UNIT_TO_SYMBOL[unit] = sym
+}
 
+async function initLucid() {
+  const seedPhrase = process.env.CARDANO_SEED_PHRASE
+  if (!seedPhrase) throw new Error('Server wallet not configured (CARDANO_SEED_PHRASE missing)')
+  
   const { Lucid, Blockfrost } = await import('lucid-cardano')
   const lucid = await Lucid.new(
     new Blockfrost(BLOCKFROST_URL, BLOCKFROST_KEY),
     'Mainnet'
   )
   lucid.selectWalletFromSeed(seedPhrase)
-  return await lucid.wallet.address()
+  return lucid
 }
 
-async function getWalletBalanceAda(): Promise<number> {
-  const address = await getWalletAddress()
+async function getWalletInfo(address: string) {
   const resp = await fetch(`${BLOCKFROST_URL}/addresses/${address}`, {
     headers: { project_id: BLOCKFROST_KEY },
   })
-  if (!resp.ok) return 0
+  if (!resp.ok) return { balanceAda: 0, tokens: {} as Record<string, number> }
   const data = await resp.json()
-  const lovelace = data.amount?.find((a: { unit: string; quantity: string }) => a.unit === 'lovelace')
-  return lovelace ? parseInt(lovelace.quantity) / 1_000_000 : 0
+  
+  let balanceAda = 0
+  const tokens: Record<string, number> = {}
+  
+  for (const a of (data.amount || [])) {
+    if (a.unit === 'lovelace') {
+      balanceAda = parseInt(a.quantity) / 1_000_000
+    } else {
+      tokens[a.unit] = parseInt(a.quantity)
+    }
+  }
+  
+  return { balanceAda, tokens }
+}
+
+async function buildAndSignSwap(
+  lucid: Awaited<ReturnType<typeof initLucid>>,
+  walletAddress: string,
+  tokenIn: string,
+  tokenOut: string,
+  amountIn: number,
+  slippage: number,
+) {
+  const buildHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (DEXHUNTER_PARTNER_KEY) buildHeaders['X-Partner-Id'] = DEXHUNTER_PARTNER_KEY
+
+  const buildBody = {
+    buyer_address: walletAddress,
+    token_in: tokenIn,
+    token_out: tokenOut,
+    amount_in: amountIn,
+    slippage,
+    blacklisted_dexes: [],
+  }
+
+  console.log('[trade/execute] DexHunter build request:', JSON.stringify({ ...buildBody, buyer_address: buildBody.buyer_address.slice(0, 20) + '...' }))
+
+  const buildResp = await fetch(`${DEXHUNTER_API}/swap/build`, {
+    method: 'POST',
+    headers: buildHeaders,
+    body: JSON.stringify(buildBody),
+  })
+
+  if (!buildResp.ok) {
+    const errText = await buildResp.text().catch(() => 'unknown')
+    throw new Error(`DexHunter build failed (${buildResp.status}): ${errText}`)
+  }
+
+  const buildData = await buildResp.json()
+  const txCbor = buildData.cbor
+
+  if (!txCbor) {
+    throw new Error(`DexHunter returned no CBOR: ${JSON.stringify(buildData).slice(0, 200)}`)
+  }
+
+  // Sign with Lucid
+  console.log('[trade/execute] Signing transaction...')
+  const tx = lucid.fromTx(txCbor)
+  const signedTx = await tx.sign().complete()
+  
+  // Submit via Lucid/Blockfrost
+  const txHash = await signedTx.submit()
+  console.log('[trade/execute] TX submitted:', txHash)
+
+  return {
+    txHash,
+    estimatedOutput: buildData.total_output,
+    splits: buildData.splits,
+  }
+}
+
+// Wait for tx confirmation by polling Blockfrost
+async function waitForConfirmation(txHash: string, maxWaitMs = 120_000): Promise<boolean> {
+  const start = Date.now()
+  while (Date.now() - start < maxWaitMs) {
+    try {
+      const resp = await fetch(`${BLOCKFROST_URL}/txs/${txHash}`, {
+        headers: { project_id: BLOCKFROST_KEY },
+      })
+      if (resp.ok) return true
+    } catch {}
+    await new Promise(r => setTimeout(r, 5000))
+  }
+  return false
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const { dex, tokenPair, amount, slippage } = await req.json()
+    const body = await req.json()
+    const { dex, tokenPair, amount, slippage, rawAmount, mode } = body
 
     // Validate inputs
-    if (!tokenPair || !amount || !slippage) {
-      return NextResponse.json({ success: false, error: 'Missing required fields: tokenPair, amount, slippage' }, { status: 400 })
+    if (!tokenPair || !slippage) {
+      return NextResponse.json({ success: false, error: 'Missing required fields: tokenPair, slippage' }, { status: 400 })
     }
-
-    if (amount > MAX_TRADE_ADA) {
-      return NextResponse.json({ success: false, error: `Trade size ${amount} ADA exceeds max ${MAX_TRADE_ADA} ADA` }, { status: 400 })
-    }
-
-    if (amount <= 0) {
-      return NextResponse.json({ success: false, error: 'Amount must be positive' }, { status: 400 })
-    }
-
-    const seedPhrase = process.env.CARDANO_SEED_PHRASE
-    if (!seedPhrase) {
-      return NextResponse.json({ success: false, error: 'Server wallet not configured (CARDANO_SEED_PHRASE missing)' }, { status: 500 })
+    if (!amount && !rawAmount) {
+      return NextResponse.json({ success: false, error: 'Missing amount or rawAmount' }, { status: 400 })
     }
 
     if (!BLOCKFROST_KEY) {
       return NextResponse.json({ success: false, error: 'Blockfrost API key not configured' }, { status: 500 })
     }
 
-    // Initialize Lucid with seed phrase
-    const { Lucid, Blockfrost } = await import('lucid-cardano')
-    const lucid = await Lucid.new(
-      new Blockfrost(BLOCKFROST_URL, BLOCKFROST_KEY),
-      'Mainnet'
-    )
-    lucid.selectWalletFromSeed(seedPhrase)
-    const walletAddress = await lucid.wallet.address()
-
-    // Check balance
-    const balance = await getWalletBalanceAda()
-    if (balance < amount + MIN_BALANCE_RESERVE_ADA) {
-      return NextResponse.json({
-        success: false,
-        error: `Insufficient balance: have ${balance.toFixed(2)} ADA, need ${(amount + MIN_BALANCE_RESERVE_ADA).toFixed(2)} ADA (including ${MIN_BALANCE_RESERVE_ADA} ADA reserve)`,
-      }, { status: 400 })
-    }
-
-    // Parse token pair
     const [tokenA, tokenB] = tokenPair.split('/')
     const sellUnit = TOKEN_UNITS[tokenA]
     const buyUnit = TOKEN_UNITS[tokenB]
@@ -114,97 +177,120 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: `Unknown token in pair: ${tokenPair}` }, { status: 400 })
     }
 
-    // DexHunter takes amounts in ADA (not lovelace)
-    const sellAmount = amount
+    const isSellingAda = tokenA === 'ADA'
 
-    // Build swap tx via DexHunter v3
-    const buildBody = {
-      buyer_address: walletAddress,
-      token_in: sellUnit === 'lovelace' ? '' : sellUnit,
-      token_out: buyUnit === 'lovelace' ? '' : buyUnit,
-      amount_in: sellAmount,
-      slippage: slippage,
-      blacklisted_dexes: [],
+    // Safety check: only enforce ADA max for ADA sells (buy leg)
+    if (isSellingAda && amount > MAX_TRADE_ADA) {
+      return NextResponse.json({ success: false, error: `Trade size ${amount} ADA exceeds max ${MAX_TRADE_ADA} ADA` }, { status: 400 })
     }
 
-    console.log('[trade/execute] Building swap via DexHunter for', tokenPair, 'amount:', amount, 'ADA')
+    // Initialize Lucid
+    const lucid = await initLucid()
+    const walletAddress = await lucid.wallet.address()
+    const walletInfo = await getWalletInfo(walletAddress)
 
-    const buildHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
-    if (DEXHUNTER_PARTNER_KEY) buildHeaders['X-Partner-Id'] = DEXHUNTER_PARTNER_KEY
-
-    const buildResp = await fetch(`${DEXHUNTER_API}/swap/build`, {
-      method: 'POST',
-      headers: buildHeaders,
-      body: JSON.stringify(buildBody),
-    })
-
-    if (!buildResp.ok) {
-      const errText = await buildResp.text().catch(() => 'unknown')
-      return NextResponse.json({
-        success: false,
-        error: `DexHunter build failed (${buildResp.status}): ${errText}`,
-      }, { status: 502 })
-    }
-
-    const buildData = await buildResp.json()
-    const txCbor = buildData.cbor || buildData.tx || buildData.transaction
-
-    if (!txCbor) {
-      return NextResponse.json({
-        success: false,
-        error: 'DexHunter returned no transaction CBOR',
-        buildResponse: buildData,
-      }, { status: 502 })
-    }
-
-    // Sign with Lucid using the seed phrase
-    console.log('[trade/execute] Signing transaction server-side...')
-    const tx = lucid.fromTx(txCbor)
-    const signedTx = await tx.sign().complete()
-
-    // Try submitting via DexHunter /swap/sign endpoint first
-    let txHash: string | undefined
-    try {
-      const signHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
-      if (DEXHUNTER_PARTNER_KEY) signHeaders['X-Partner-Id'] = DEXHUNTER_PARTNER_KEY
-
-      const signResp = await fetch(`${DEXHUNTER_API}/swap/sign`, {
-        method: 'POST',
-        headers: signHeaders,
-        body: JSON.stringify({
-          txCbor: signedTx.toString(),
-          signatures: [],
-        }),
-      })
-      if (signResp.ok) {
-        const signData = await signResp.json()
-        if (signData.txHash || signData.tx_hash) {
-          txHash = signData.txHash || signData.tx_hash
-          console.log('[trade/execute] Submitted via DexHunter sign:', txHash)
-        }
+    // Balance checks
+    if (isSellingAda) {
+      if (walletInfo.balanceAda < amount + MIN_BALANCE_RESERVE_ADA) {
+        return NextResponse.json({
+          success: false,
+          error: `Insufficient ADA: have ${walletInfo.balanceAda.toFixed(2)}, need ${(amount + MIN_BALANCE_RESERVE_ADA).toFixed(2)} (incl. ${MIN_BALANCE_RESERVE_ADA} reserve)`,
+        }, { status: 400 })
       }
-    } catch (e) {
-      console.warn('[trade/execute] DexHunter sign endpoint failed, falling back to direct submit:', e)
+    } else {
+      // Selling a token — check we have it
+      const tokenBalance = walletInfo.tokens[sellUnit] || 0
+      const sellRaw = rawAmount || amount
+      if (tokenBalance < sellRaw) {
+        return NextResponse.json({
+          success: false,
+          error: `Insufficient ${tokenA}: have ${tokenBalance} raw units, need ${sellRaw}`,
+        }, { status: 400 })
+      }
+      // Also need some ADA for fees
+      if (walletInfo.balanceAda < MIN_BALANCE_RESERVE_ADA) {
+        return NextResponse.json({
+          success: false,
+          error: `Insufficient ADA for fees: have ${walletInfo.balanceAda.toFixed(2)}, need at least ${MIN_BALANCE_RESERVE_ADA}`,
+        }, { status: 400 })
+      }
     }
 
-    // Fallback: submit directly via Lucid/Blockfrost
-    if (!txHash) {
-      txHash = await signedTx.submit()
-      console.log('[trade/execute] Submitted via Blockfrost:', txHash)
+    // === ARBITRAGE MODE: buy then sell in sequence ===
+    if (mode === 'arbitrage') {
+      const { buyDex, sellDex } = body
+      
+      // Step 1: Buy token (ADA → Token)
+      console.log(`[arb] Step 1: Buy ${tokenB} with ${amount} ADA on ${buyDex || 'best'}`)
+      const buyResult = await buildAndSignSwap(
+        lucid, walletAddress,
+        '', // ADA in
+        buyUnit === 'lovelace' ? '' : buyUnit,
+        amount,
+        slippage,
+      )
+
+      console.log(`[arb] Buy tx: ${buyResult.txHash}, estimated output: ${buyResult.estimatedOutput}`)
+
+      // Step 2: Wait for buy confirmation
+      console.log('[arb] Waiting for buy confirmation...')
+      const confirmed = await waitForConfirmation(buyResult.txHash, 120_000)
+      if (!confirmed) {
+        return NextResponse.json({
+          success: false,
+          error: 'Buy tx not confirmed within 2 minutes',
+          buyTxHash: buyResult.txHash,
+        })
+      }
+
+      // Step 3: Check how many tokens we actually received
+      await new Promise(r => setTimeout(r, 3000)) // Brief delay for UTxO indexing
+      const postBuyInfo = await getWalletInfo(walletAddress)
+      const tokenReceived = postBuyInfo.tokens[buyUnit === 'lovelace' ? '' : buyUnit] || 0
+      
+      // Use estimated output as the sell amount (DexHunter gives us this in human-readable)
+      const sellAmount = buyResult.estimatedOutput || amount
+      
+      console.log(`[arb] Step 3: Sell ${sellAmount} ${tokenB} for ADA on ${sellDex || 'best'}`)
+
+      // Step 4: Sell token back to ADA (Token → ADA)
+      const sellResult = await buildAndSignSwap(
+        lucid, walletAddress,
+        buyUnit === 'lovelace' ? '' : buyUnit,
+        '', // ADA out
+        sellAmount,
+        slippage,
+      )
+
+      return NextResponse.json({
+        success: true,
+        mode: 'arbitrage',
+        buyTxHash: buyResult.txHash,
+        sellTxHash: sellResult.txHash,
+        buyEstimatedOutput: buyResult.estimatedOutput,
+        sellEstimatedOutput: sellResult.estimatedOutput,
+        netProfitAda: (sellResult.estimatedOutput || 0) - amount,
+        walletAddress,
+        source: 'server-wallet',
+      })
     }
 
-    console.log('[trade/execute] Transaction submitted:', txHash)
+    // === SINGLE SWAP MODE ===
+    const tokenIn = sellUnit === 'lovelace' ? '' : sellUnit
+    const tokenOut = buyUnit === 'lovelace' ? '' : buyUnit
+    const sellAmount = rawAmount || amount
+
+    const result = await buildAndSignSwap(lucid, walletAddress, tokenIn, tokenOut, sellAmount, slippage)
 
     return NextResponse.json({
       success: true,
-      txHash,
+      txHash: result.txHash,
+      estimatedOutput: result.estimatedOutput,
       walletAddress,
-      estimatedOutput: buildData.estimated_output || buildData.estimatedOutput,
       source: 'server-wallet',
     })
   } catch (e) {
     const message = e instanceof Error ? e.message : 'Unknown error'
-    // Never log seed phrase - but log other errors
     console.error('[trade/execute] Error:', message)
     return NextResponse.json({ success: false, error: message }, { status: 500 })
   }
