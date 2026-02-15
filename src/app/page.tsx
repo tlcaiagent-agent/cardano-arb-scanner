@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { ArbResponse } from '@/lib/types'
+import { ArbResponse, DexStatus } from '@/lib/types'
 import { REFRESH_INTERVAL_MS, DEFAULT_TRADE_SIZE_ADA } from '@/lib/constants'
 
 type SortKey = 'spreadPct' | 'netProfitAda' | 'buyLiquidity'
@@ -44,7 +44,7 @@ export default function ScannerPage() {
     .filter(o => !tokenFilter || o.pair.toLowerCase().includes(tokenFilter.toLowerCase()))
     .sort((a, b) => {
       if (sortBy === 'buyLiquidity') return Math.min(b.buyLiquidity, b.sellLiquidity) - Math.min(a.buyLiquidity, a.sellLiquidity)
-      return (b as any)[sortBy] - (a as any)[sortBy]
+      return (b[sortBy] as number) - (a[sortBy] as number)
     }) || []
 
   const triArbs = data?.triangular.filter(t => t.profitPct > 0) || []
@@ -55,7 +55,7 @@ export default function ScannerPage() {
       {data?.isDemo && (
         <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg px-4 py-2.5 text-amber-300 text-sm flex items-center gap-2">
           <span>⚠️</span>
-          <span><strong>DEMO DATA</strong> — Live DEX APIs unavailable. Showing simulated prices to demonstrate the scanner. Real API integration is a config swap away.</span>
+          <span><strong>DEMO DATA</strong> — Live DEX APIs unavailable. Showing simulated prices to demonstrate the scanner.</span>
         </div>
       )}
 
@@ -80,11 +80,10 @@ export default function ScannerPage() {
 
       {/* EUTXO note */}
       <div className="text-xs text-slate-500 bg-slate-800/30 rounded px-3 py-1.5">
-        ℹ️ Cardano uses EUTXO — arbitrage execution requires specific UTXO handling, not simple swaps like EVM chains. This scanner is for <strong>monitoring only</strong>.
+        ℹ️ Cardano uses EUTXO — each UTxO can only be consumed once per block, so arb execution timing matters. Slippage on low-liquidity pairs can eat profits.
       </div>
 
       {tab === 'direct' ? (
-        /* Direct Arbitrage Table */
         <div className="overflow-x-auto rounded-lg border border-slate-800">
           <table className="w-full text-sm">
             <thead>
@@ -138,7 +137,6 @@ export default function ScannerPage() {
           </table>
         </div>
       ) : (
-        /* Triangular Arbitrage */
         <div className="overflow-x-auto rounded-lg border border-slate-800">
           <table className="w-full text-sm">
             <thead>
@@ -168,6 +166,34 @@ export default function ScannerPage() {
           </table>
         </div>
       )}
+
+      {/* Data Sources Footer */}
+      {data?.dexStatuses && (
+        <DataSourcesFooter statuses={data.dexStatuses} />
+      )}
+    </div>
+  )
+}
+
+function DataSourcesFooter({ statuses }: { statuses: DexStatus[] }) {
+  return (
+    <div className="bg-slate-800/20 border border-slate-800 rounded-lg px-4 py-3 mt-6">
+      <div className="text-xs text-slate-500 uppercase tracking-wide mb-2">Data Sources</div>
+      <div className="flex flex-wrap gap-3">
+        {statuses.map(s => (
+          <div key={s.name} className="flex items-center gap-1.5 text-xs">
+            <span>{s.status === 'live' ? '🟢' : s.status === 'stale' ? '🟡' : '🔴'}</span>
+            <span className="text-slate-300">{s.name}</span>
+            {s.pairCount > 0 && <span className="text-slate-500">({s.pairCount} pairs)</span>}
+            {s.responseTimeMs !== undefined && s.status === 'live' && (
+              <span className="text-slate-600">{s.responseTimeMs}ms</span>
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="text-xs text-slate-600 mt-2">
+        🟢 Live — real-time API data &nbsp; 🟡 Stale — cached data {'>'} 15s &nbsp; 🔴 Demo — simulated prices (API unavailable)
+      </div>
     </div>
   )
 }
@@ -181,15 +207,16 @@ function StatCard({ label, value, color }: { label: string; value: string | numb
   )
 }
 
-function FilterInput({ label, ...props }: { label: string; value: any; onChange: (v: string) => void; [k: string]: any }) {
-  const { onChange, ...rest } = props
+function FilterInput({ label, ...props }: { label: string; value: string | number; onChange: (v: string) => void; [k: string]: unknown }) {
+  const { onChange, value, ...rest } = props
   return (
     <div>
       <label className="text-xs text-slate-500 block mb-1">{label}</label>
       <input
-        {...rest}
-        onChange={e => onChange(e.target.value)}
+        value={value as string}
+        onChange={e => (onChange as (v: string) => void)(e.target.value)}
         className="bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-white w-36 focus:outline-none focus:border-blue-500"
+        {...rest}
       />
     </div>
   )
@@ -208,6 +235,8 @@ const dexColors: Record<string, string> = {
   SundaeSwap: 'bg-purple-500/20 text-purple-300',
   WingRiders: 'bg-cyan-500/20 text-cyan-300',
   MuesliSwap: 'bg-amber-500/20 text-amber-300',
+  DexHunter: 'bg-emerald-500/20 text-emerald-300',
+  CoinGecko: 'bg-orange-500/20 text-orange-300',
 }
 
 function DexBadge({ dex }: { dex: string }) {

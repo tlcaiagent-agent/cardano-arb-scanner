@@ -11,7 +11,6 @@ export async function GET(req: NextRequest) {
   const tradeSize = parseFloat(sp.get('tradeSize') || '') || DEFAULT_TRADE_SIZE_ADA
   const minSpread = parseFloat(sp.get('minSpread') || '') || 0
 
-  // Only use cache if same default params
   if (cache && Date.now() - cache.ts < CACHE_TTL_MS && tradeSize === DEFAULT_TRADE_SIZE_ADA && minSpread === 0) {
     return NextResponse.json(cache.data)
   }
@@ -30,6 +29,7 @@ export async function GET(req: NextRequest) {
       bestSpread: opportunities[0]?.spreadPct || 0,
       lastUpdate: Date.now(),
     },
+    dexStatuses: statuses,
     isDemo,
   }
 
